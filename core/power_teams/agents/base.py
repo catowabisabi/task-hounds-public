@@ -625,8 +625,10 @@ def _restart_opencode_server(agent_name: str, host: str, port: int) -> bool:
         return False
 
     from power_teams.runtime.opencode_supervisor import (
+        build_opencode_serve_args as _oc_serve_args,
         opencode_env as _oc_env,
-        creation_flags as _oc_flags,
+        opencode_debug_console_enabled as _oc_debug_console,
+        opencode_serve_creation_flags as _oc_serve_flags,
         LOG_DIR as _OC_LOG_DIR,
     )
     _OC_LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -634,26 +636,28 @@ def _restart_opencode_server(agent_name: str, host: str, port: int) -> bool:
     try:
         log_f = log_path.open("a", encoding="utf-8", buffering=1)
         log_f.write(f"\n[restart] restarting {agent_name} on {host}:{port}\n")
-        serve_args: str | list[str]
-        serve_args = [bin_path, "serve", "--port", str(port)]
-        if os.name == "nt":
-            serve_args = f'"{bin_path}" serve --port {port}'
+        debug_console = _oc_debug_console()
+        serve_args = _oc_serve_args(bin_path, port, debug_console=debug_console)
         proc = subprocess.Popen(
             serve_args,
             cwd=str(ROOT),
             env=_oc_env(),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            stdout=None if debug_console else subprocess.PIPE,
+            stderr=None if debug_console else subprocess.STDOUT,
             text=True,
             encoding="utf-8",
             errors="replace",
             stdin=subprocess.DEVNULL,
-            creationflags=_oc_flags(),
+            creationflags=_oc_serve_flags(debug_console=debug_console),
         )
-        threading.Thread(
-            target=lambda: [log_f.write(line) for line in (proc.stdout or [])],
-            daemon=True,
-        ).start()
+        if debug_console:
+            log_f.write("[restart] debug console enabled; OpenCode logs are visible in the serve shell\n")
+            log_f.close()
+        else:
+            threading.Thread(
+                target=lambda: [log_f.write(line) for line in (proc.stdout or [])],
+                daemon=True,
+            ).start()
         log(f"{agent_name}: restart process pid={proc.pid}, waiting up to 30s for health")
     except Exception as exc:
         log(f"{agent_name}: failed to launch restart process: {exc}")

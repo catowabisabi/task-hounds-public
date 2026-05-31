@@ -81,6 +81,14 @@ POWER_TEAMS_SILENCE_TIMEOUT=480
 POWER_TEAMS_HARD_TIMEOUT=1200
 ```
 
+For web/API debugging on Windows, you can make managed `opencode serve` open a visible console with debug logs:
+
+```env
+POWER_TEAMS_OPENCODE_DEBUG_CONSOLE=1
+```
+
+This is intended for development. Normal desktop/EXE usage should leave it unset so serve runs in the background.
+
 ### 3. Run the server
 
 ```powershell

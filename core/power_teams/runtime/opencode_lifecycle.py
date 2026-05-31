@@ -420,10 +420,13 @@ class OpenCodeLifecycleManager:
 
         working_dir = cwd
         spec_port = port
-        serve_args: str | list[str]
-        serve_args = [opencode_bin, "serve", "--port", str(spec_port)]
-        if os.name == "nt":
-            serve_args = f'"{opencode_bin}" serve --port {spec_port}'
+        from power_teams.runtime.opencode_supervisor import (
+            build_opencode_serve_args,
+            opencode_debug_console_enabled,
+            opencode_serve_creation_flags,
+        )
+        debug_console = opencode_debug_console_enabled()
+        serve_args = build_opencode_serve_args(opencode_bin, spec_port, debug_console=debug_console)
 
         if is_port_reachable(self.host, spec_port):
             existing = list_opencode_server_instances(owner="power_teams", status="running", path=self.db_path)
@@ -459,15 +462,19 @@ class OpenCodeLifecycleManager:
                 serve_args,
                 cwd=str(working_dir),
                 env=opencode_env(),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                stdout=None if debug_console else subprocess.PIPE,
+                stderr=None if debug_console else subprocess.STDOUT,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
                 stdin=subprocess.DEVNULL,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                creationflags=opencode_serve_creation_flags(debug_console=debug_console),
             )
-            threading.Thread(target=_pipe_process_output, args=(proc, log), daemon=True).start()
+            if debug_console:
+                log.write(f"[{utc_now()}] debug console enabled; OpenCode logs are visible in the serve shell\n")
+                log.close()
+            else:
+                threading.Thread(target=_pipe_process_output, args=(proc, log), daemon=True).start()
             update_opencode_server_status(instance_id, "running", pid=proc.pid, path=self.db_path)
             ok, error = wait_for_opencode_http(self.host, spec_port, proc, timeout=30)
             if not ok:

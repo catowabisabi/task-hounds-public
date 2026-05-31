@@ -226,32 +226,29 @@ class OpenCodeSupervisor:
         log = log_path.open("a", encoding="utf-8", buffering=1)
         log.write(f"\n[{utc_now()}] starting {spec.name} on {self.host}:{spec.port}\n")
 
-        args: str | list[str]
-        args = [
-            self.opencode_bin,
-            "serve",
-            "--port",
-            str(spec.port),
-        ]
-        if os.name == "nt":
-            args = f'"{self.opencode_bin}" serve --port {spec.port}'
+        debug_console = opencode_debug_console_enabled()
+        args = build_opencode_serve_args(self.opencode_bin, spec.port, debug_console=debug_console)
         process = subprocess.Popen(
             args,
             cwd=str(spec.cwd),
             env=opencode_env(),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            stdout=None if debug_console else subprocess.PIPE,
+            stderr=None if debug_console else subprocess.STDOUT,
             text=True,
             encoding="utf-8",
             errors="replace",
             stdin=subprocess.DEVNULL,
-            creationflags=creation_flags(),
+            creationflags=opencode_serve_creation_flags(debug_console=debug_console),
         )
-        threading.Thread(
-            target=pipe_output,
-            args=(process, log, spec.name),
-            daemon=True,
-        ).start()
+        if debug_console:
+            log.write(f"[{utc_now()}] debug console enabled; OpenCode logs are visible in the serve shell\n")
+            log.close()
+        else:
+            threading.Thread(
+                target=pipe_output,
+                args=(process, log, spec.name),
+                daemon=True,
+            ).start()
         return ManagedServer(spec=spec, process=process, log_path=log_path)
 
     def _server_specs(self, cwd: Path) -> list[ServerSpec]:
@@ -364,6 +361,44 @@ def creation_flags() -> int:
     if os.name != "nt":
         return 0
     return getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def _truthy(value: object) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _runtime_setting(name: str) -> object:
+    settings_path = RUNTIME_DIR / "settings.json"
+    if not settings_path.exists():
+        return None
+    try:
+        return json.loads(settings_path.read_text(encoding="utf-8")).get(name)
+    except Exception:
+        return None
+
+
+def opencode_debug_console_enabled() -> bool:
+    env_value = os.environ.get("POWER_TEAMS_OPENCODE_DEBUG_CONSOLE")
+    if env_value is not None:
+        return _truthy(env_value)
+    return _truthy(_runtime_setting("opencode_debug_console"))
+
+
+def build_opencode_serve_args(opencode_bin: str, port: int, *, debug_console: bool = False) -> str | list[str]:
+    args = [opencode_bin, "serve", "--port", str(port)]
+    if debug_console:
+        args += ["--print-logs", "--log-level", "DEBUG"]
+    if os.name == "nt":
+        return " ".join([f'"{opencode_bin}"', *args[1:]])
+    return args
+
+
+def opencode_serve_creation_flags(*, debug_console: bool = False) -> int:
+    if os.name != "nt":
+        return 0
+    if debug_console:
+        return getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+    return creation_flags()
 
 
 def opencode_env() -> dict[str, str]:

@@ -13,15 +13,17 @@ export function SettingsToggle({ onRefresh }: { onRefresh: () => void }) {
   const [silenceTimeout, setSilenceTimeout] = useState(480);
   const [hardTimeout, setHardTimeout] = useState(1200);
   const [opencodeBin, setOpencodeBin] = useState("");
+  const [opencodeDebugConsole, setOpencodeDebugConsole] = useState(false);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    apiGet<{ language?: string; silence_timeout?: number; silence_timeout_seconds?: number; hard_timeout?: number; hard_timeout_seconds?: number; opencode_bin?: string }>("/api/settings")
+    apiGet<{ language?: string; silence_timeout?: number; silence_timeout_seconds?: number; hard_timeout?: number; hard_timeout_seconds?: number; opencode_bin?: string; opencode_debug_console?: boolean }>("/api/settings")
       .then(s => {
         if (s.language) setLanguage(s.language);
         setSilenceTimeout(Number(s.silence_timeout_seconds ?? s.silence_timeout ?? 480));
         setHardTimeout(Number(s.hard_timeout_seconds ?? s.hard_timeout ?? 1200));
         setOpencodeBin(s.opencode_bin ?? "");
+        setOpencodeDebugConsole(Boolean(s.opencode_debug_console));
       })
       .catch(() => {});
   }, []);
@@ -59,12 +61,13 @@ export function SettingsToggle({ onRefresh }: { onRefresh: () => void }) {
     try {
       await apiPost("/api/settings", {
         opencode_bin: opencodeBin.trim(),
+        opencode_debug_console: opencodeDebugConsole,
       });
       onRefresh();
     } finally {
       setSaving(false);
     }
-  }, [onRefresh, opencodeBin]);
+  }, [onRefresh, opencodeBin, opencodeDebugConsole]);
 
   return (
     <div className="relative">
@@ -150,6 +153,15 @@ export function SettingsToggle({ onRefresh }: { onRefresh: () => void }) {
             <p className="text-[10px] mb-2 leading-snug" style={{ color: "var(--text-dim)" }}>
               Use the npm package binary. Do not use .opencode\bin\opencode.exe.
             </p>
+            <label className="flex items-start gap-2 text-[10px] mb-2" style={{ color: "var(--text-secondary)" }}>
+              <input
+                type="checkbox"
+                checked={opencodeDebugConsole}
+                onChange={e => setOpencodeDebugConsole(e.target.checked)}
+                className="mt-0.5"
+              />
+              <span>Open serve debug console</span>
+            </label>
             <button
               onClick={saveOpencodeBin}
               disabled={saving}
