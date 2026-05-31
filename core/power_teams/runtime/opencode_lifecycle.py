@@ -444,7 +444,7 @@ class OpenCodeLifecycleManager:
             status="starting",
             pid=None,
             cwd=str(working_dir),
-            command=f'"{opencode_bin}" serve --port {spec_port}',
+            command=" ".join(str(part) for part in serve_args) if isinstance(serve_args, list) else serve_args,
             topology=topology,
             roles_json=json.dumps(["manager", "worker", "reviewer", "chat"]) if topology == "shared" else None,
             project_session_id=project_session_id,

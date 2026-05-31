@@ -389,6 +389,9 @@ def build_opencode_serve_args(opencode_bin: str, port: int, *, debug_console: bo
     if debug_console:
         args += ["--print-logs", "--log-level", "DEBUG"]
     if os.name == "nt":
+        if debug_console:
+            command = " ".join([f'"{opencode_bin}"', *args[1:]])
+            return [os.environ.get("COMSPEC", "cmd.exe"), "/k", command]
         return " ".join([f'"{opencode_bin}"', *args[1:]])
     return args
 
