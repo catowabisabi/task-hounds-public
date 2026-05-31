@@ -68,11 +68,22 @@ export function AgentConfig({ agent, onSave }: { agent: Agent; onSave: () => voi
 
   const save = async () => {
     setSaving(true);
+    const nextPort = parseInt(port) || agent.port;
+    const nextAgent = ocAgent || "general";
+    const nextModel = model || null;
     await apiPut(`/api/agents/${agent.name}`, {
-      port: parseInt(port) || agent.port,
+      host: agent.host || "127.0.0.1",
+      port: nextPort,
       backend_type: "opencode",
-      model: model || null,
-      opencode_agent: ocAgent || null,
+      model: nextModel,
+      opencode_agent: nextAgent,
+    });
+    await apiPut(`/api/runtime/bindings/${agent.name}`, {
+      host: agent.host || "127.0.0.1",
+      port: nextPort,
+      model: nextModel,
+      opencode_agent: nextAgent,
+      binding_source: "user",
     });
     setSaving(false);
     onSave();
