@@ -655,6 +655,12 @@ class OpenCodeLifecycleManager:
         self.refresh_external_servers()
         results = []
         candidate_ports = []
+        live_servers = _list_opencode_pids_with_ports()
+        live_port_to_pid = {}
+        for proc in live_servers:
+            for live_port in proc.get("ports", []):
+                live_port_to_pid[int(live_port)] = int(proc["pid"])
+                candidate_ports.append(int(live_port))
         for binding in list_agent_bindings(path=self.db_path):
             if binding["port"]:
                 candidate_ports.append(int(binding["port"]))
@@ -669,7 +675,13 @@ class OpenCodeLifecycleManager:
                 if not is_port_reachable(self.host, port, timeout=0.15):
                     continue
                 if is_opencode_reachable(self.host, port, timeout=0.5):
-                    results.append({"host": self.host, "port": port, "reachable": True})
+                    results.append({
+                        "host": self.host,
+                        "port": port,
+                        "reachable": True,
+                        "pid": live_port_to_pid.get(port),
+                        "source": "process_scan" if port in live_port_to_pid else "candidate_scan",
+                    })
             except Exception:
                 pass
         return results

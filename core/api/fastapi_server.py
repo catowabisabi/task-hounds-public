@@ -79,13 +79,23 @@ def ensure_backend_ready() -> None:
     _db().seed_default_agents(DB_PATH)
 
 
-def ensure_runtime_ready() -> None:
+def ensure_runtime_ready(*, restart_managed: bool = False) -> None:
     if not _opencode_enabled:
         return
     try:
-        from power_teams.runtime.opencode_lifecycle import OpenCodeLifecycleManager
+        from power_teams.runtime.opencode_lifecycle import OpenCodeLifecycleManager, cleanup_orphan_opencode_servers
+        from power_teams.runtime.opencode_supervisor import find_free_port
         mgr = OpenCodeLifecycleManager(db_path=DB_PATH)
-        result = mgr.reconcile_runtime(start_if_missing=True, restart_unowned=False)
+        if restart_managed:
+            cleanup_result = cleanup_orphan_opencode_servers(db_path=DB_PATH)
+            _append_text(_RUN_LOG, f"[{utc_now()}] fastapi orphan cleanup: {cleanup_result}\n")
+        result = mgr.reconcile_runtime(start_if_missing=False, restart_unowned=restart_managed)
+        if not result.get("selected"):
+            started = mgr.start_managed_server(port=find_free_port())
+            if "error" not in started:
+                result = mgr.reconcile_runtime(start_if_missing=False, restart_unowned=False)
+            else:
+                result = {**result, "started": started}
         _append_text(_RUN_LOG, f"[{utc_now()}] fastapi runtime reconcile: {result}\n")
     except Exception as exc:
         _append_text(_RUN_LOG, f"[{utc_now()}] fastapi runtime reconcile failed: {exc}\n")
@@ -122,7 +132,19 @@ app.add_middleware(
 @app.on_event("startup")
 def startup() -> None:
     ensure_backend_ready()
-    ensure_runtime_ready()
+    ensure_runtime_ready(restart_managed=True)
+
+
+@app.on_event("shutdown")
+def shutdown() -> None:
+    if not _opencode_enabled:
+        return
+    try:
+        from power_teams.runtime.opencode_lifecycle import OpenCodeLifecycleManager
+        OpenCodeLifecycleManager(db_path=DB_PATH).stop_all_managed(reason="backend_exit")
+        _append_text(_RUN_LOG, f"[{utc_now()}] fastapi shutdown cleanup done\n")
+    except Exception as exc:
+        _append_text(_RUN_LOG, f"[{utc_now()}] fastapi shutdown cleanup error: {exc}\n")
 
 
 # ── Auth ─────────────────────────────────────────────────────────────────────
@@ -1652,8 +1674,16 @@ def runtime_checkpoints():
 @app.post("/api/runtime/checkpoints/{cp_id}/resume", tags=["runtime"])
 def runtime_checkpoint_resume(cp_id: str):
     try:
-        row = _db().get_latest_checkpoint(path=DB_PATH)
-        return {"checkpoint": dict(row) if row else None}
+        if not cp_id.isdigit():
+            raise HTTPException(status_code=400, detail="checkpoint id must be numeric")
+        from power_teams.runtime.opencode_lifecycle import OpenCodeLifecycleManager
+        row = _db().get_checkpoint_by_id(int(cp_id), path=DB_PATH)
+        restore_result = None
+        if row:
+            restore_result = OpenCodeLifecycleManager(db_path=DB_PATH).restore_checkpoint_to_registry(int(cp_id))
+        return {"checkpoint": dict(row) if row else None, "restore": restore_result}
+    except HTTPException:
+        raise
     except Exception as e:
         return {"error": str(e)}
 
@@ -1676,6 +1706,47 @@ def runtime_binding(role: str):
             return {"binding": dict(row) if row else None}
         bindings = list_agent_bindings(path=DB_PATH)
         return {"bindings": [dict(b) for b in bindings]}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.put("/api/runtime/bindings/{role}", tags=["runtime"])
+@app.post("/api/runtime/bindings/{role}", tags=["runtime"])
+async def runtime_binding_update(role: str, request: Request):
+    try:
+        if role not in ("manager", "worker", "reviewer", "chat"):
+            raise HTTPException(status_code=404, detail="unknown role")
+        payload = await request.json()
+        from power_teams.db import get_agent_binding, update_agent, upsert_agent_binding
+        host = payload.get("host", "127.0.0.1")
+        port = int(payload.get("port", 18765))
+        opencode_agent = payload.get("opencode_agent", "general")
+        model = payload.get("model")
+        upsert_agent_binding(
+            role,
+            server_instance_id=payload.get("server_instance_id"),
+            host=host,
+            port=port,
+            opencode_agent=opencode_agent,
+            model=model,
+            binding_source=payload.get("binding_source", "user"),
+            path=DB_PATH,
+        )
+        update_agent(role, host=host, port=port, opencode_agent=opencode_agent, model=model)
+        row = get_agent_binding(role, path=DB_PATH)
+        return {"binding": dict(row) if row else None}
+    except HTTPException:
+        raise
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/runtime/policy", tags=["runtime"])
+def runtime_policy_get():
+    from power_teams.db import get_runtime_policy
+    try:
+        policy = get_runtime_policy(path=DB_PATH)
+        return {"policy": dict(policy) if policy else None}
     except Exception as e:
         return {"error": str(e)}
 
