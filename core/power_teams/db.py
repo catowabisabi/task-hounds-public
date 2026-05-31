@@ -808,6 +808,11 @@ def _role_session_column(role: str) -> str:
         raise ValueError(f"unknown role for opencode session lookup: {role}") from exc
 
 
+def _other_role_session_columns(role: str) -> list[str]:
+    current = _role_session_column(role)
+    return [column for column in _ROLE_SESSION_COLUMNS.values() if column != current]
+
+
 def resolve_role_opencode_session(
     project_session_id: str,
     role: str,
@@ -852,7 +857,14 @@ def save_role_opencode_session(
     if not opencode_session_id:
         raise ValueError("opencode_session_id is required when saving opencode session")
     column = _role_session_column(role)
+    other_columns = _other_role_session_columns(role)
     with connect(path) as db:
+        for other_column in other_columns:
+            db.execute(
+                f"UPDATE project_sessions SET {other_column}=NULL "
+                f"WHERE id=? AND {other_column}=?",
+                (project_session_id, opencode_session_id),
+            )
         cur = db.execute(
             f"UPDATE project_sessions SET {column}=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
             (opencode_session_id, project_session_id),
