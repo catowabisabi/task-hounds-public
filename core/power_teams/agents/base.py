@@ -240,6 +240,10 @@ Every response MUST contain a <TODO_LIST>...</TODO_LIST> block. The Todo rail
 in the UI is wired to read this block. You control top-level items; worker
 adds sub-items under each one.
 
+Every response MUST also contain a <TODO_UPDATE_JSON>...</TODO_UPDATE_JSON>
+block. This JSON is the authoritative machine-readable todo update. Do not
+claim a todo is done in MANAGER_MESSAGE unless this JSON marks it completed.
+
 CRITICAL: If you write anything meaningful in <PLAN>, you MUST translate it
 into concrete tasks in <TODO_LIST>. Do not keep implementation details only in
 the planning text. The todo list is the executable project control surface.
@@ -253,13 +257,32 @@ Format (one item per line, exactly these status markers):
 - [✗] blocked task four — reason
 </TODO_LIST>
 
+JSON format (valid JSON only, no markdown fences):
+
+<TODO_UPDATE_JSON>
+{
+  "items": [
+    {
+      "id": "existing todo id when available",
+      "content": "short stable todo title",
+      "status": "pending|in_progress|completed|blocked",
+      "position": 0
+    }
+  ]
+}
+</TODO_UPDATE_JSON>
+
 Rules:
 - Always emit the FULL current todo list (not a diff). The UI replaces your
   top-level items with this list each cycle, preserving worker sub-items
   where the top-level text matches.
+- Always emit the FULL current todo JSON in TODO_UPDATE_JSON. Prefer existing
+  todo IDs from the current todo context when available.
 - Top-level items must be short (under ~80 chars) and unique within the list.
 - Update status markers based on actual worker progress, not aspirations.
 - Do NOT skip the <TODO_LIST> even if the list is unchanged — emit it again.
+- Do NOT create a todo whose content says "No further task needed"; use
+  <DIRECTIVE_COMPLETE/> when no further work is required.
 ===========================================
 """
 
@@ -1636,16 +1659,114 @@ def _persist_todos(items: list[dict], owner: str = "manager") -> bool:
         return False
 
 
+def _parse_todo_update_json(block: str) -> list[dict]:
+    if not block or not block.strip():
+        return []
+    try:
+        payload = json.loads(block.strip())
+    except Exception as exc:
+        log(f"Invalid TODO_UPDATE_JSON: {exc}")
+        return []
+    raw_items = payload.get("items") if isinstance(payload, dict) else payload
+    if not isinstance(raw_items, list):
+        return []
+    items: list[dict] = []
+    for raw in raw_items:
+        if not isinstance(raw, dict):
+            continue
+        content = str(raw.get("content") or "").strip()
+        status = str(raw.get("status") or "pending").strip().lower()
+        if status not in {"pending", "in_progress", "completed", "blocked"}:
+            status = "pending"
+        item = {
+            "id": str(raw.get("id") or "").strip() or None,
+            "content": content,
+            "status": status,
+            "priority": str(raw.get("priority") or "medium").strip() or "medium",
+            "position": raw.get("position"),
+        }
+        if item["id"] or item["content"]:
+            items.append(item)
+    return items
+
+
+def _persist_todo_update_json(items: list[dict], owner: str = "manager") -> bool:
+    if not items:
+        return False
+    sid = _sid()
+    if not sid:
+        log("TODO_UPDATE_JSON present but no active session — skipped")
+        return False
+    import uuid
+    try:
+        with connect(DB_PATH) as conn:
+            existing = conn.execute(
+                """SELECT id, content, status, position FROM session_todos
+                   WHERE session_id=? AND parent_id IS NULL
+                   ORDER BY position, id""",
+                (sid,),
+            ).fetchall()
+            by_id = {dict(row)["id"]: dict(row) for row in existing}
+            by_content = {dict(row)["content"]: dict(row) for row in existing}
+            kept_ids: set[str] = set()
+            for pos, item in enumerate(items):
+                content = item.get("content") or ""
+                status = item.get("status") or "pending"
+                item_id = item.get("id")
+                try:
+                    position = int(item.get("position")) if item.get("position") is not None else pos
+                except (TypeError, ValueError):
+                    position = pos
+
+                row = by_id.get(item_id) if item_id else None
+                if row is None and content:
+                    row = by_content.get(content)
+
+                if row:
+                    kept_ids.add(row["id"])
+                    conn.execute(
+                        """UPDATE session_todos
+                           SET content=?, status=?, priority=?, position=?, owner=?, updated_at=CURRENT_TIMESTAMP
+                           WHERE id=? AND session_id=?""",
+                        (content or row["content"], status, item.get("priority") or "medium", position, owner, row["id"], sid),
+                    )
+                elif content and not content.lower().startswith("no further"):
+                    new_id = item_id or str(uuid.uuid4())
+                    kept_ids.add(new_id)
+                    conn.execute(
+                        """INSERT INTO session_todos
+                             (id, session_id, parent_id, content, status, priority, position, owner)
+                           VALUES (?, ?, NULL, ?, ?, ?, ?, ?)""",
+                        (new_id, sid, content, status, item.get("priority") or "medium", position, owner),
+                    )
+
+            for row in existing:
+                row = dict(row)
+                if row["id"] in kept_ids:
+                    continue
+                conn.execute("DELETE FROM session_todos WHERE id=? OR parent_id=?", (row["id"], row["id"]))
+            conn.commit()
+        log(f"TODO_UPDATE_JSON synced: {len(items)} items, by={owner}")
+        return True
+    except Exception as exc:
+        log(f"Failed to save TODO_UPDATE_JSON: {exc}")
+        return False
+
+
 def _persist_plan_and_todos_from(response: str, owner: str = "manager") -> None:
-    """Extract <PLAN> and <TODO_LIST> from a manager response and write to DB."""
+    """Extract <PLAN> and <TODO_UPDATE_JSON> from a manager response and write to DB."""
     plan = _extract_section(response, "PLAN")
     if plan:
         _persist_plan(plan, updated_by=owner)
-    todo_block = _extract_section(response, "TODO_LIST")
-    if todo_block:
-        items = _parse_todo_block(todo_block)
-        if items:
-            _persist_todos(items, owner=owner)
+    todo_json = _extract_section(response, "TODO_UPDATE_JSON")
+    if todo_json:
+        items = _parse_todo_update_json(todo_json)
+        if items and _persist_todo_update_json(items, owner=owner):
+            return
+        log("TODO_UPDATE_JSON present but invalid or empty; skipped TODO_LIST fallback")
+        return
+    log("TODO_UPDATE_JSON missing; skipped TODO_LIST fallback")
+    return
 
 
 def apply_handoff_update(manager_response: str, updated_by: str = "manager"):

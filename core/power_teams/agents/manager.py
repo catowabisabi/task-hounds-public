@@ -22,6 +22,7 @@ from power_teams.agents.base import (
     _get_latest_handoff,
     _persist_plan_and_todos_from,
     _parse_todo_block,
+    _parse_todo_update_json,
     _list_manager_messages,
     _release_manager_lock,
     _upsert_handoff,
@@ -207,7 +208,7 @@ def _current_plan_todo_context(session_id: str | None) -> str:
                 (session_id,),
             ).fetchone()
             todos = db.execute(
-                """SELECT content, status, owner FROM session_todos
+                """SELECT id, content, status, owner, position FROM session_todos
                    WHERE session_id=?
                    ORDER BY parent_id IS NOT NULL, parent_id, position, id""",
                 (session_id,),
@@ -215,7 +216,10 @@ def _current_plan_todo_context(session_id: str | None) -> str:
         lines = ["=== CURRENT MANAGER PLAN ===", plan["content"] if plan and plan["content"] else "(none)", "", "=== CURRENT TODO LIST ==="]
         if todos:
             for row in todos:
-                lines.append(f"- [{row['status']}] {row['content']} ({row['owner'] or 'unknown'})")
+                lines.append(
+                    f"- id={row['id']} status={row['status']} position={row['position']} "
+                    f"owner={row['owner'] or 'unknown'} content={row['content']}"
+                )
         else:
             lines.append("(none)")
         return "\n".join(lines)
@@ -331,6 +335,7 @@ def _manager_cycle_impl() -> None:
             f"{handoff_ctx}\n\n"
             "=== RECENT HUMAN MESSAGES TO MANAGER ===\n"
             f"{human_notes_ctx}\n\n"
+            f"{plan_todo_ctx}\n\n"
             "=== NEW HUMAN DIRECTIVE ===\n"
             f"{user_request}\n\n"
             "Your job:\n"
@@ -486,6 +491,8 @@ def _manager_cycle_impl() -> None:
             "2. DECISION: Clearly state PASS or FAIL in your MANAGER_MESSAGE.\n"
             "3. UPDATE TODO LIST (CRITICAL):\n"
             "   - Mark every completed item from the current task as [x] in <TODO_LIST>.\n"
+            "   - Also mark every completed item as status=\"completed\" in <TODO_UPDATE_JSON>.\n"
+            "   - Use the existing todo id values from CURRENT TODO LIST in <TODO_UPDATE_JSON>.\n"
             "   - Remove obsolete completed detail items if they no longer help the dashboard.\n"
             "   - If you create a new worker task, include its concrete subtasks as new [ ] TODO_LIST items.\n"
             "   - Never leave completed work as unchecked [ ] items.\n"
@@ -626,7 +633,7 @@ def _handle_manager_response(
     - SUGGESTION_CONTENT + SUGGESTION_VERIFICATION -> suggestion_queue
     - HANDOFF_UPDATE   -> project_handoff
 
-    Retries up to 3 times if PLAN or TODO_LIST is missing.
+    Retries up to 3 times if PLAN, TODO_LIST, or TODO_UPDATE_JSON is missing.
     """
     MAX_RETRIES = 3
     _retry = 0
@@ -635,20 +642,27 @@ def _handle_manager_response(
         response = repair_mojibake(response or "")
         has_plan = bool(_extract_section(response, "PLAN"))
         has_todo = bool(_extract_section(response, "TODO_LIST"))
+        todo_json_items = _parse_todo_update_json(_extract_section(response, "TODO_UPDATE_JSON"))
+        has_todo_json = bool(todo_json_items)
 
         _persist_plan_and_todos_from(response, owner="manager")
 
-        if (not has_plan or not has_todo) and _retry < MAX_RETRIES:
+        if (not has_plan or not has_todo or not has_todo_json) and _retry < MAX_RETRIES:
             missing = []
             if not has_plan: missing.append("<PLAN>")
             if not has_todo: missing.append("<TODO_LIST>")
+            if not has_todo_json: missing.append("<TODO_UPDATE_JSON>")
             log(f"⚠ Manager response missing {', '.join(missing)} — asking manager to retry (attempt {_retry + 1}/{MAX_RETRIES})")
             correction = (
                 f"Your previous response was missing the required {' and '.join(missing)} block(s).\n"
                 "Re-emit your COMPLETE response now, including:\n"
                 "  - A full <PLAN>...</PLAN> block (Goal, Steps, Success Criteria)\n"
                 "  - A full <TODO_LIST>...</TODO_LIST> block (current top-level items with status)\n"
+                "  - A full <TODO_UPDATE_JSON>...</TODO_UPDATE_JSON> block with valid JSON; use existing todo IDs from CURRENT TODO LIST; mark completed work as status=\"completed\" here.\n"
                 "  - The MANAGER_MESSAGE, SUGGESTION_CONTENT, SUGGESTION_VERIFICATION, and HANDOFF_UPDATE you intended.\n\n"
+                "Do not claim completion in MANAGER_MESSAGE unless TODO_UPDATE_JSON sets the matching todo status to completed.\n"
+                "Current todo context with IDs:\n"
+                f"{_current_plan_todo_context(get_active_session_id())}\n\n"
                 "Do not abbreviate. The UI parses these blocks directly; missing blocks mean the cycle is incomplete.\n\n"
                 + _build_manager_instructions()
             )
@@ -661,6 +675,16 @@ def _handle_manager_response(
         log(f"⚠ Manager STILL missing <PLAN> after {_retry} retries — accepting incomplete cycle")
     if not has_todo:
         log(f"⚠ Manager STILL missing <TODO_LIST> after {_retry} retries — accepting incomplete cycle")
+
+    if not has_todo_json:
+        msg = (
+            "Manager response rejected: missing or invalid <TODO_UPDATE_JSON> after "
+            f"{_retry} retries. I did not create a worker task from this response because "
+            "todo status must be updated through the database JSON block."
+        )
+        log(msg)
+        _add_manager_message(msg)
+        return
 
     manager_msg = _extract_section(response, "MANAGER_MESSAGE")
     suggestion_content = _extract_section(response, "SUGGESTION_CONTENT")
@@ -705,7 +729,18 @@ def _handle_manager_response(
             ],
         }
 
+    def _is_no_further_task(content: str) -> bool:
+        text = (content or "").strip().lower()
+        return (
+            text.startswith("no further")
+            or "no further task" in text
+            or "no further worker task" in text
+            or "\u7121\u65b0\u4efb\u52d9" in text
+        )
+
     directive_complete = "<DIRECTIVE_COMPLETE" in response or "TASK_HOUNDS_STOP_LOOP" in manager_msg
+    if suggestion_content and _is_no_further_task(suggestion_content):
+        directive_complete = True
 
     if manager_msg:
         _add_manager_message(manager_msg)
@@ -720,6 +755,8 @@ def _handle_manager_response(
         if not session_id or not content.strip():
             return
         title = content.strip().splitlines()[0][:180]
+        if _is_no_further_task(title):
+            return
         with connect(DB_PATH) as conn:
             existing = conn.execute(
                 "SELECT id FROM session_todos WHERE session_id=? AND content=? LIMIT 1",
