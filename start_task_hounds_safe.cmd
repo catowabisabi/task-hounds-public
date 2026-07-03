@@ -139,7 +139,7 @@ echo.
 
 echo [5/6] Preflight: verify MiniMax key is available from env or .env...
 cd /d "%ROOT%"
-python "%ROOT%\docs\tools\debug\check_minimax_env.py"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$key='OPENCODE_API_KEY_MINIMAX'; if ([Environment]::GetEnvironmentVariable($key)) { Write-Host ($key + '= present (process env)'); exit 0 }; $paths=@((Join-Path $env:POWER_TEAMS_RUNTIME_DIR '.env'),(Join-Path $env:ROOT '.env')); foreach ($path in $paths) { if (-not (Test-Path -LiteralPath $path)) { continue }; foreach ($line in Get-Content -LiteralPath $path) { if ($line -match ('^\s*' + [regex]::Escape($key) + '\s*=\s*(.+?)\s*$')) { $value=$Matches[1].Trim().Trim('\"').Trim([char]39); if ($value) { Write-Host ($key + '= present (' + $path + ')'); exit 0 } } } }; Write-Host ($key + '= MISSING'); Write-Host 'Checked:'; foreach ($path in $paths) { Write-Host ('  - ' + $path) }; exit 2"
 if %ERRORLEVEL% neq 0 (
     echo.
     echo ERROR: OPENCODE_API_KEY_MINIMAX was not found in process env or .env files.
