@@ -268,6 +268,61 @@ def _format_repair_prompt(contract, invalid_text: str, error: Exception) -> str:
     )
 
 
+def _manager_contract_fallback(state: M.FlowState, text: str, error: Exception) -> dict:
+    """Return a safe ManagerOutput payload when the Manager never emits JSON.
+
+    Worker and Reviewer contract failures are represented in the graph
+    state instead of crashing the worker. Manager needs the same behavior:
+    a malformed model response should pause for human attention, not
+    surface as a generic Background Server "GraphFlow failed" error.
+    """
+    ctx = state.existing_context or {}
+    current_plan = stringify_field(ctx.get("plan")) or state.plan
+    current_handoff = ctx.get("handoff_update") if isinstance(ctx.get("handoff_update"), dict) else {}
+    current_task = (
+        state.suggestion_content
+        or stringify_field(current_handoff.get("current_task"))
+        or state.flow_input.human_suggested_new_task_or_item.strip()
+        or "Review the latest Manager output and decide the next safe task."
+    )
+    message = (
+        "Manager response did not match the structured JSON contract after retry. "
+        "GraphFlow paused for human attention instead of continuing with ambiguous instructions."
+    )
+    evidence = [
+        f"contract_error: {str(error)[:1000]}",
+    ]
+    if text.strip():
+        evidence.append("manager_output_excerpt: " + text.strip()[:1000])
+    return {
+        "input_digest": state.input_digest or state.flow_input.human_directive.strip() or "Manager contract fallback",
+        "decision": {
+            "action": "request_human",
+            "summary": "Manager structured output was invalid after retry.",
+            "rationale": message,
+            "evidence": evidence,
+        },
+        "manager_message": message,
+        "plan": current_plan or "Pause and inspect the Manager output contract failure before continuing.",
+        "todo_list": [
+            {
+                "content": current_task,
+                "status": "in_progress",
+                "priority": "high",
+                "owner": "manager",
+            }
+        ],
+        "suggestion_content": "",
+        "suggestion_verification": "Human review required because Manager returned no valid JSON contract.",
+        "handoff_update": {
+            **current_handoff,
+            "current_task": current_task,
+            "working_direction": message,
+            "human_concerns": "Manager format_contract_error after retry.",
+        },
+    }
+
+
 def _parse_worker_metadata(text: str) -> dict:
     """Best-effort parse of the Worker's report JSON.
 
@@ -669,7 +724,8 @@ def _call_manager(state: M.FlowState) -> dict:
         try:
             validated = _validate_contract(text, ManagerOutput)
         except (ValueError, ValidationError) as second_error:
-            raise RuntimeError(f"manager format_contract_error after retry: {second_error}") from second_error
+            payload = _manager_contract_fallback(state, text, second_error)
+            return {"text": text, "payload": payload}
     payload = validated.model_dump(mode="json", exclude_none=True)
     # Return both the raw text and the parsed payload so callers
     # (manager_plan) can also extract prompt tokens that the LLM emits
