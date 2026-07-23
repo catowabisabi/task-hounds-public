@@ -568,6 +568,28 @@ _FORCE_TODO_INSTRUCTION = (
     "Never leave todo_list empty unless the directive is fully complete.\n"
 )
 
+_MANAGER_JSON_CONTRACT = (
+    "JSON-only contract:\n"
+    "- First character must be `{`; last character must be `}`.\n"
+    "- Return exactly one JSON object. No markdown fences, prose, XML, comments, or schema echo.\n"
+    "- Unknown keys are forbidden.\n"
+    "- decision.action must be one of: execute, retry, split, complete, request_human, stop.\n"
+    "- todo.status must be one of: pending, in_progress, completed.\n"
+    "- todo.priority must be one of: high, medium, low.\n"
+    "- stop_signal may be null, TASK_HOUNDS_STOP_LOOP, or DIRECTIVE_COMPLETE.\n"
+    "- Required top-level keys: input_digest, decision, manager_message, plan, todo_list, "
+    "suggestion_content, suggestion_verification, handoff_update.\n"
+    "- Optional top-level keys: archive_updates, reopen_todos, stop_signal.\n"
+    "Minimal shape:\n"
+    "{\"input_digest\":\"...\",\"decision\":{\"action\":\"execute\",\"summary\":\"...\","
+    "\"rationale\":\"...\",\"evidence\":[]},\"manager_message\":\"...\",\"plan\":\"...\","
+    "\"todo_list\":[{\"content\":\"...\",\"status\":\"pending\",\"priority\":\"high\","
+    "\"owner\":\"manager\"}],\"suggestion_content\":\"...\","
+    "\"suggestion_verification\":\"...\",\"handoff_update\":{\"current_task\":\"...\","
+    "\"working_direction\":\"...\",\"completion_criteria\":[]},\"archive_updates\":[],"
+    "\"reopen_todos\":[],\"stop_signal\":null}\n"
+)
+
 
 def _manager_settings_path() -> Path:
     return ROOT / "core" / "runtime" / "settings.json"
@@ -659,8 +681,7 @@ def _manager_prompt(state: M.FlowState) -> str:
         f"Reviewer outcome:\n{state.reviewer_qa_result or '(none)'}\n\n"
         f"Recent manager messages:\n{manager_history}\n\n"
         f"Manager prompt reference:\n{prompt_hint[:4000] if prompt_hint else '(none)'}\n\n"
-        "OUTPUT JSON SCHEMA (unknown keys are forbidden):\n"
-        f"{json.dumps(ManagerOutput.model_json_schema(), ensure_ascii=False)}\n"
+        f"{_MANAGER_JSON_CONTRACT}\n"
     )
 
 
