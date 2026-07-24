@@ -495,6 +495,14 @@ def flow01_resume_run(run_id: int, body: dict | None = None) -> dict:
         or status.startswith("paused_before_")
         or (status == "technical_error" and db_wf.load_checkpoint(run_id) is not None)
     ):
+        if status == "technical_error":
+            return {
+                "ok": False,
+                "error": f"run {run_id} has no resumable checkpoint; start a fresh GraphFlow run instead.",
+                "error_code": "not_resumable",
+                "run_id": run_id,
+                "current_status": run.get("status"),
+            }
         return {
             "ok": False,
             "error": f"run {run_id} not in paused state (status={run.get('status')!r})",
